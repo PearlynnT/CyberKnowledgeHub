@@ -298,16 +298,7 @@ class DocumentRetrieval:
         Returns:
             List[Document]: A list of LangChain documents.
         """
-        # if additional_metadata is None:
-        #     additional_metadata = {}
-
-        # _, _, langchain_docs = parse_doc_universal(
-        #     doc=doc_folder, additional_metadata=additional_metadata, lite_mode=self.pdf_only_mode
-        # )
-
-        # return langchain_docs
-
-        # Instead of parsing local files, retrieve documents from Pinata
+        # Retrieve documents from Pinata
         pinata_files = self.pinata_client.list_files()
         documents = []
         for file in pinata_files:
@@ -336,13 +327,6 @@ class DocumentRetrieval:
         output_db: Optional[str] = None,
         collection_name: Optional[str] = None,
     ) -> Any:
-        # logger.info(f'Created collection, name is {collection_name}')
-        # vectorstore = self.vectordb.create_vector_store(
-        #     text_chunks, embeddings, output_db=output_db, collection_name=collection_name, db_type='chroma'
-        # )
-        # return vectorstore
-
-        # Use PinataVectorStore instead of Chroma
         vectorstore = PinataVectorStore(embeddings, self.pinata_client)
         texts = [doc.page_content for doc in text_chunks]
         metadatas = [doc.metadata for doc in text_chunks]
@@ -350,11 +334,7 @@ class DocumentRetrieval:
         return vectorstore
 
     def load_vdb(self, db_path: str, embeddings: Any, collection_name: Optional[str] = None) -> Any:
-        # logger.info(f'Loading collection, name is {collection_name}')
-        # vectorstore = self.vectordb.load_vdb(db_path, embeddings, db_type='chroma', collection_name=collection_name)
-        # return vectorstore
-
-        # Instead of loading from a local database, initialize PinataVectorStore
+        # Initialize PinataVectorStore
         return PinataVectorStore(embeddings, self.pinata_client)
 
     def init_retriever(self, vectorstore: PinataVectorStore) -> None:
@@ -366,22 +346,6 @@ class DocumentRetrieval:
                 'k': self.retrieval_info['k_retrieved_documents'],
             },
         )
-        # if self.retrieval_info['rerank']:
-        #     self.retriever = vectorstore.as_retriever(
-        #         search_type='similarity_score_threshold',
-        #         search_kwargs={
-        #             'score_threshold': self.retrieval_info['score_threshold'],
-        #             'k': self.retrieval_info['k_retrieved_documents'],
-        #         },
-        #     )
-        # else:
-        #     self.retriever = vectorstore.as_retriever(
-        #         search_type='similarity_score_threshold',
-        #         search_kwargs={
-        #             'score_threshold': self.retrieval_info['score_threshold'],
-        #             'k': self.retrieval_info['final_k_retrieved_documents'],
-        #         },
-        #     )
 
     def get_qa_retrieval_chain(self, conversational: bool = False) -> RetrievalQAChain:
         """

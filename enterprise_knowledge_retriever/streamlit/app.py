@@ -30,44 +30,6 @@ logging.basicConfig(level=logging.INFO)
 logging.info('URL: http://localhost:8501')
 
 
-# def save_files_user(docs: List[UploadedFile]) -> str:
-#     """
-#     Save all user uploaded files in Streamlit to the tmp dir with their file names
-
-#     Args:
-#         docs (List[UploadFile]): A list of uploaded files in Streamlit
-
-#     Returns:
-#         str: path where the files are saved.
-#     """
-
-#     # Create the data/tmp folder if it doesn't exist
-#     temp_folder = os.path.join(kit_dir, 'data/tmp')
-#     if not os.path.exists(temp_folder):
-#         os.makedirs(temp_folder)
-#     else:
-#         # If there are already files there, delete them
-#         for filename in os.listdir(temp_folder):
-#             file_path = os.path.join(temp_folder, filename)
-#             try:
-#                 if os.path.isfile(file_path) or os.path.islink(file_path):
-#                     os.unlink(file_path)
-#                 elif os.path.isdir(file_path):
-#                     shutil.rmtree(file_path)
-#             except Exception as e:
-#                 print(f'Failed to delete {file_path}. Reason: {e}')
-
-#     # Save all selected files to the tmp dir with their file names
-#     for doc in docs:
-#         assert hasattr(doc, 'name'), 'doc has no attribute name.'
-#         assert callable(doc.getvalue), 'doc has no method getvalue.'
-#         temp_file = os.path.join(temp_folder, doc.name)
-#         with open(temp_file, 'wb') as f:
-#             f.write(doc.getvalue())
-
-#     return temp_folder
-
-
 def handle_userinput(user_question: str) -> None:
     if user_question:
         try:
@@ -99,7 +61,7 @@ def handle_userinput(user_question: str) -> None:
 
         with st.chat_message(
             'ai',
-            avatar='https://sambanova.ai/hubfs/logotype_sambanova_orange.png',
+            avatar='https://img.freepik.com/premium-vector/hacker-vector-concept-unknown-man-stealing-data-from-email-while-using-laptop_505557-4212.jpg',
         ):
             st.write(f'{ans}')
             if st.session_state.show_sources:
@@ -138,8 +100,8 @@ def main() -> None:
     initialize_env_variables(prod_mode)
 
     st.set_page_config(
-        page_title='AI Starter Kit',
-        page_icon='https://sambanova.ai/hubfs/logotype_sambanova_orange.png',
+        page_title='Cyber Knowledge Hub',
+        page_icon='https://img.freepik.com/premium-vector/hacker-vector-concept-unknown-man-stealing-data-from-email-while-using-laptop_505557-4212.jpg',
     )
 
     if 'conversation' not in st.session_state:
@@ -167,7 +129,22 @@ def main() -> None:
         )
         st.session_state.mp_events.demo_launch()
 
-    st.title(':orange[SambaNova] Analyst Assistant')
+    page_by_img = """
+    <style>
+    [data-testid="stAppViewContainer"] {
+    background-image: url("https://www.shutterstock.com/shutterstock/videos/1079786111/thumb/12.jpg?ip=x480");
+    background-size: cover;
+    }
+    </style>
+    """
+
+    st.markdown(page_by_img, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <h1 style='color: white; text-align: center;'>Cyber Knowledge Hub</h1>
+        """,
+        unsafe_allow_html=True
+    )
 
     with st.sidebar:
         st.title('Setup')
@@ -221,147 +198,6 @@ def main() -> None:
                         except Exception as e:
                             st.error(f'An error occurred while processing: {str(e)}')
                             
-
-        #     st.markdown('**1. Pick a datasource**')
-
-        #     # Conditionally set the options based on prod_mode
-        #     datasource_options = ['Upload files (create new vector db)']
-        #     if not prod_mode:
-        #         datasource_options.append('Use existing vector db')
-
-        #     datasource = st.selectbox('', datasource_options)
-
-        #     if isinstance(datasource, str) and 'Upload' in datasource:
-        #         if config.get('pdf_only_mode', False):
-        #             docs = st.file_uploader('Add PDF files', accept_multiple_files=True, type=['pdf'])
-        #         else:
-        #             docs = st.file_uploader(
-        #                 'Add files',
-        #                 accept_multiple_files=True,
-        #                 type=[
-        #                     '.eml',
-        #                     '.html',
-        #                     '.json',
-        #                     '.md',
-        #                     '.msg',
-        #                     '.rst',
-        #                     '.rtf',
-        #                     '.txt',
-        #                     '.xml',
-        #                     '.png',
-        #                     '.jpg',
-        #                     '.jpeg',
-        #                     '.tiff',
-        #                     '.bmp',
-        #                     '.heic',
-        #                     '.csv',
-        #                     '.doc',
-        #                     '.docx',
-        #                     '.epub',
-        #                     '.odt',
-        #                     '.pdf',
-        #                     '.ppt',
-        #                     '.pptx',
-        #                     '.tsv',
-        #                     '.xlsx',
-        #                 ],
-        #             )
-        #         st.markdown('**2. Process your documents and create vector store**')
-        #         st.markdown(
-        #             '**Note:** Depending on the size and number of your documents, this could take several minutes'
-        #         )
-        #         st.markdown('Create database')
-        #         if st.button('Process'):
-        #             st.session_state.mp_events.input_submitted('document_ingest')
-        #             with st.spinner('Processing'):
-        #                 try:
-        #                     if docs is not None:
-        #                         temp_folder = save_files_user(docs)
-        #                     text_chunks = st.session_state.document_retrieval.parse_doc(temp_folder)
-        #                     if len(text_chunks) == 0:
-        #                         st.error(
-        #                             """No able to get text from the documents. check your docs or try setting
-        #                                 pdf_only_mode to False"""
-        #                         )
-        #                     embeddings = st.session_state.document_retrieval.load_embedding_model()
-        #                     collection_name = default_collection if not prod_mode else None
-        #                     vectorstore = st.session_state.document_retrieval.create_vector_store(
-        #                         text_chunks, embeddings, output_db=None, collection_name=collection_name
-        #                     )
-        #                     st.session_state.vectorstore = vectorstore
-        #                     st.session_state.document_retrieval.init_retriever(vectorstore)
-        #                     st.session_state.conversation = st.session_state.document_retrieval.get_qa_retrieval_chain(
-        #                         conversational=conversational
-        #                     )
-        #                     st.toast(f'File uploaded! Go ahead and ask some questions', icon='🎉')
-        #                     st.session_state.input_disabled = False
-        #                 except Exception as e:
-        #                     st.error(f'An error occurred while processing: {str(e)}')
-
-        #         if not prod_mode:
-        #             st.markdown('[Optional] Save database for reuse')
-        #             save_location = st.text_input('Save location', './data/my-vector-db').strip()
-        #             if st.button('Process and Save database'):
-        #                 with st.spinner('Processing'):
-        #                     try:
-        #                         if docs is not None:
-        #                             temp_folder = save_files_user(docs)
-        #                         text_chunks = st.session_state.document_retrieval.parse_doc(temp_folder)
-        #                         embeddings = st.session_state.document_retrieval.load_embedding_model()
-        #                         vectorstore = st.session_state.document_retrieval.create_vector_store(
-        #                             text_chunks, embeddings, output_db=save_location, collection_name=default_collection
-        #                         )
-        #                         st.session_state.vectorstore = vectorstore
-        #                         st.session_state.document_retrieval.init_retriever(vectorstore)
-        #                         st.session_state.conversation = (
-        #                             st.session_state.document_retrieval.get_qa_retrieval_chain(
-        #                                 conversational=conversational
-        #                             )
-        #                         )
-        #                         st.toast(
-        #                             f"""File uploaded and saved to {save_location} with collection
-        #                              '{default_collection}'! Go ahead and ask some questions""",
-        #                             icon='🎉',
-        #                         )
-        #                         st.session_state.input_disabled = False
-        #                     except Exception as e:
-        #                         st.error(f'An error occurred while processing and saving: {str(e)}')
-
-        #     elif isinstance(datasource, str) and not prod_mode and 'Use existing' in datasource:
-        #         db_path = st.text_input(
-        #             f'Absolute path to your DB folder',
-        #             placeholder='E.g., /Users/<username>/path/to/your/vectordb',
-        #         ).strip()
-        #         st.markdown('**2. Load your datasource and create vectorstore**')
-        #         st.markdown('**Note:** Depending on the size of your vector database, this could take a few seconds')
-        #         if st.button('Load'):
-        #             with st.spinner('Loading vector DB...'):
-        #                 if db_path == '':
-        #                     st.error('You must provide a path', icon='🚨')
-        #                 else:
-        #                     if os.path.exists(db_path):
-        #                         try:
-        #                             embeddings = st.session_state.document_retrieval.load_embedding_model()
-        #                             collection_name = default_collection if not prod_mode else None
-        #                             vectorstore = st.session_state.document_retrieval.load_vdb(
-        #                                 db_path, embeddings, collection_name=collection_name
-        #                             )
-        #                             st.toast(
-        #                                 f"""Database loaded{'with collection '
-        #                                  + default_collection if not prod_mode else ''}"""
-        #                             )
-        #                             st.session_state.vectorstore = vectorstore
-        #                             st.session_state.document_retrieval.init_retriever(vectorstore)
-        #                             st.session_state.conversation = (
-        #                                 st.session_state.document_retrieval.get_qa_retrieval_chain(
-        #                                     conversational=conversational
-        #                                 )
-        #                             )
-        #                             st.session_state.input_disabled = False
-        #                         except Exception as e:
-        #                             st.error(f'An error occurred while loading the database: {str(e)}')
-        #                     else:
-        #                         st.error('Database not present at ' + db_path, icon='🚨')
             st.markdown('**3. Ask questions about your data!**')
 
             with st.expander('Additional settings', expanded=True):

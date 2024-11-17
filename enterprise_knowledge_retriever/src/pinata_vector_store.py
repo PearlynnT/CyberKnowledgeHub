@@ -2,6 +2,7 @@ import json
 import numpy as np
 from typing import List, Dict, Any, Tuple
 from langchain.schema import Document
+from langchain.schema import BaseRetriever
 from langchain.vectorstores.base import VectorStore
 from langchain.embeddings.base import Embeddings
 from enterprise_knowledge_retriever.src.pinata_client import PinataClient
@@ -47,26 +48,6 @@ class PinataVectorStore(VectorStore):
 
         return cids
 
-    # def similarity_search(self, query: str, k: int = 4) -> List[Document]:
-    #     query_embedding = self.embeddings.embed_query(query)
-        
-    #     # Retrieve all documents from Pinata
-    #     all_docs = self.pinata_client.list_files()
-        
-    #     # Compute similarities and sort
-    #     similarities = []
-    #     for doc in all_docs:
-    #         doc_content = self.pinata_client.get_file_content(doc['ipfs_pin_hash'])
-    #         doc_data = json.loads(doc_content)
-    #         similarity = self.compute_similarity(query_embedding, doc_data['embedding'])
-    #         similarities.append((similarity, doc_data))
-        
-    #     similarities.sort(key=lambda x: x[0], reverse=True)
-    #     print(similarities)
-        
-    #     # Return top k documents
-    #     return [Document(page_content=doc['text'], metadata=doc['metadata']) for _, doc in similarities[:k]]
-
     def _select_relevance_score_fn(self):
         return lambda x: x
 
@@ -110,36 +91,6 @@ class PinataVectorStore(VectorStore):
         else:
             raise ValueError(f"search_type {search_type} not supported")
 
-    # def similarity_search(self, query: str, k: int = 4) -> List[Document]:
-    #     try:
-    #         query_embedding = self.embeddings.embed_query(query)
-    #         all_docs = self.pinata_client.list_files()
-    #         print(f"Retrieved {len(all_docs)} documents from Pinata")
-            
-    #         similarities = []
-    #         for doc in all_docs:
-    #             try:
-    #                 doc_content = self.pinata_client.get_file_content(doc['ipfs_pin_hash'])
-    #                 doc_data = json.loads(doc_content)
-    #                 similarity = self.compute_similarity(query_embedding, doc_data['embedding'])
-    #                 similarities.append((similarity, doc_data))
-    #             except Exception as e:
-    #                 print(f"Error processing document {doc['ipfs_pin_hash']}: {str(e)}")
-            
-    #         similarities.sort(key=lambda x: x[0], reverse=True)
-    #         print(f"Computed similarities for {len(similarities)} documents")
-            
-    #         return [Document(page_content=doc['text'], metadata=doc['metadata']) for _, doc in similarities[:k]]
-    #     except Exception as e:
-    #         print(f"Error in similarity_search: {str(e)}")
-    #         raise
-
-    # @staticmethod
-    # def compute_similarity(vec1, vec2):
-    #     # Implement cosine similarity or other similarity measure
-    #     # For simplicity, we'll use dot product here
-    #     return sum(a * b for a, b in zip(vec1, vec2))
-
     @staticmethod
     def compute_similarity(vec1, vec2):
         return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
@@ -152,7 +103,6 @@ class PinataVectorStore(VectorStore):
         instance.add_texts(texts, metadatas)
         return instance
 
-from langchain.schema import BaseRetriever
 
 class VectorStoreRetriever(BaseRetriever):
     def __init__(self, vectorstore: PinataVectorStore, search_type="similarity", search_kwargs=None):
