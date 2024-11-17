@@ -30,7 +30,7 @@ class PinataClient:
         headers = {
             'Authorization': f'Bearer {self.jwt}'
         }
-        response = requests.get(f'https://gateway.pinata.cloud/ipfs/{ipfs_hash}', headers=headers)
+        response = requests.get(f'https://cyan-broad-parrotfish-837.mypinata.cloud/ipfs/{ipfs_hash}', headers=headers)
         response.raise_for_status()
         # return response.content.decode('utf-8')
         # Create a BytesIO object from the response content

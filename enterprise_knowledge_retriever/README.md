@@ -1,3 +1,14 @@
+# For HackUTD
+I modified the open-source code from SambaNova's Enterprise Knowledge Retrieval AI Starter Kit to suit the purposes of my project. The main changes that I made in the GitHub Repository are in this folder `enterprise_knowledge_retriever`. The rest are the starter code from SambaNova.
+
+## Setting Up Environment Variables
+Create a file name .env in the root of the project directory and add the following:
+```
+SAMBANOVA_API_KEY=your_sambanova_api_key
+PINATA_API_KEY=your_pinata_api_key
+PINATA_SECRET_API_KEY=your_pinata_secret_api_key
+PINATA_JWT=your_pinata_jwt
+```
 
 <a href="https://sambanova.ai/">
 <picture>

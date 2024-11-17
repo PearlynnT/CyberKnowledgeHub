@@ -52,7 +52,7 @@ class PinataVectorStore(VectorStore):
         return lambda x: x
 
     def similarity_search_with_relevance_scores(
-        self, query: str, k: int = 4, score_threshold: float = None
+        self, query: str, k: int = 3, score_threshold: float = None
     ) -> List[Tuple[Document, float]]:
         query_embedding = self.embeddings.embed_query(query)
         all_docs = self.pinata_client.list_files()
@@ -75,7 +75,7 @@ class PinataVectorStore(VectorStore):
         similarities.sort(key=lambda x: x[1], reverse=True)
         return similarities[:k]
 
-    def similarity_search(self, query: str, k: int = 4) -> List[Document]:
+    def similarity_search(self, query: str, k: int = 3) -> List[Document]:
         results = self.similarity_search_with_relevance_scores(query, k)
         return [doc for doc, _ in results]
 

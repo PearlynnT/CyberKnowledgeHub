@@ -31,6 +31,16 @@ logging.info('URL: http://localhost:8501')
 
 
 def handle_userinput(user_question: str) -> None:
+    st.markdown(
+        """
+        <style>
+        .stSpinner > div > div {
+            color: white; /* Change the text color to white */
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
     if user_question:
         try:
             with st.spinner('Processing...'):
@@ -63,7 +73,14 @@ def handle_userinput(user_question: str) -> None:
             'ai',
             avatar='https://img.freepik.com/premium-vector/hacker-vector-concept-unknown-man-stealing-data-from-email-while-using-laptop_505557-4212.jpg',
         ):
-            st.write(f'{ans}')
+            st.markdown(
+                f"""
+                <div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px;'>
+                    {ans}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             if st.session_state.show_sources:
                 with st.expander('Sources'):
                     st.markdown(
