@@ -37,6 +37,9 @@ load_dotenv(os.path.join(repo_dir, '.env'))
 
 from utils.parsing.sambaparse import parse_doc_universal
 
+from enterprise_knowledge_retriever.src.pinata_client import PinataClient
+from enterprise_knowledge_retriever.src.pinata_vector_store import PinataVectorStore
+
 # Configure the logger
 logging.basicConfig(
     level=logging.INFO,  # Set the logging level (e.g., INFO, DEBUG)
@@ -243,7 +246,7 @@ class RetrievalQAChain(Chain):
 
 class DocumentRetrieval:
     def __init__(self, sambanova_api_key: str) -> None:
-        self.vectordb = VectorDb()
+        self.pinata_client = PinataClient()
         config_info = self.get_config_info()
         self.llm_info: Dict[str, Any] = config_info[0]
         self.embedding_model_info: Dict[str, Any] = config_info[1]
@@ -295,14 +298,27 @@ class DocumentRetrieval:
         Returns:
             List[Document]: A list of LangChain documents.
         """
-        if additional_metadata is None:
-            additional_metadata = {}
+        # if additional_metadata is None:
+        #     additional_metadata = {}
 
-        _, _, langchain_docs = parse_doc_universal(
-            doc=doc_folder, additional_metadata=additional_metadata, lite_mode=self.pdf_only_mode
-        )
+        # _, _, langchain_docs = parse_doc_universal(
+        #     doc=doc_folder, additional_metadata=additional_metadata, lite_mode=self.pdf_only_mode
+        # )
 
-        return langchain_docs
+        # return langchain_docs
+
+        # Instead of parsing local files, retrieve documents from Pinata
+        pinata_files = self.pinata_client.list_files()
+        documents = []
+        for file in pinata_files:
+            try:
+                content = self.pinata_client.get_file_content(file['ipfs_pin_hash'])
+                doc = Document(page_content=content, metadata={'filename': file['metadata']['name']})
+                documents.append(doc)
+            except Exception as e:
+                print(f"Error processing file {file['ipfs_pin_hash']}: {str(e)}")
+        print(f"Number of documents processed: {len(documents)}")
+        return documents
 
     def load_embedding_model(self) -> Embeddings:
         embeddings = APIGateway.load_embedding_model(
@@ -320,34 +336,52 @@ class DocumentRetrieval:
         output_db: Optional[str] = None,
         collection_name: Optional[str] = None,
     ) -> Any:
-        logger.info(f'Created collection, name is {collection_name}')
-        vectorstore = self.vectordb.create_vector_store(
-            text_chunks, embeddings, output_db=output_db, collection_name=collection_name, db_type='chroma'
-        )
+        # logger.info(f'Created collection, name is {collection_name}')
+        # vectorstore = self.vectordb.create_vector_store(
+        #     text_chunks, embeddings, output_db=output_db, collection_name=collection_name, db_type='chroma'
+        # )
+        # return vectorstore
+
+        # Use PinataVectorStore instead of Chroma
+        vectorstore = PinataVectorStore(embeddings, self.pinata_client)
+        texts = [doc.page_content for doc in text_chunks]
+        metadatas = [doc.metadata for doc in text_chunks]
+        vectorstore.add_texts(texts, metadatas)
         return vectorstore
 
     def load_vdb(self, db_path: str, embeddings: Any, collection_name: Optional[str] = None) -> Any:
-        logger.info(f'Loading collection, name is {collection_name}')
-        vectorstore = self.vectordb.load_vdb(db_path, embeddings, db_type='chroma', collection_name=collection_name)
-        return vectorstore
+        # logger.info(f'Loading collection, name is {collection_name}')
+        # vectorstore = self.vectordb.load_vdb(db_path, embeddings, db_type='chroma', collection_name=collection_name)
+        # return vectorstore
 
-    def init_retriever(self, vectorstore: Any) -> None:
-        if self.retrieval_info['rerank']:
-            self.retriever = vectorstore.as_retriever(
-                search_type='similarity_score_threshold',
-                search_kwargs={
-                    'score_threshold': self.retrieval_info['score_threshold'],
-                    'k': self.retrieval_info['k_retrieved_documents'],
-                },
-            )
-        else:
-            self.retriever = vectorstore.as_retriever(
-                search_type='similarity_score_threshold',
-                search_kwargs={
-                    'score_threshold': self.retrieval_info['score_threshold'],
-                    'k': self.retrieval_info['final_k_retrieved_documents'],
-                },
-            )
+        # Instead of loading from a local database, initialize PinataVectorStore
+        return PinataVectorStore(embeddings, self.pinata_client)
+
+    def init_retriever(self, vectorstore: PinataVectorStore) -> None:
+        self.retriever = VectorStoreRetriever(
+            vectorstore=vectorstore,
+            search_type='similarity_score_threshold',
+            search_kwargs={
+                'score_threshold': self.retrieval_info['score_threshold'],
+                'k': self.retrieval_info['k_retrieved_documents'],
+            },
+        )
+        # if self.retrieval_info['rerank']:
+        #     self.retriever = vectorstore.as_retriever(
+        #         search_type='similarity_score_threshold',
+        #         search_kwargs={
+        #             'score_threshold': self.retrieval_info['score_threshold'],
+        #             'k': self.retrieval_info['k_retrieved_documents'],
+        #         },
+        #     )
+        # else:
+        #     self.retriever = vectorstore.as_retriever(
+        #         search_type='similarity_score_threshold',
+        #         search_kwargs={
+        #             'score_threshold': self.retrieval_info['score_threshold'],
+        #             'k': self.retrieval_info['final_k_retrieved_documents'],
+        #         },
+        #     )
 
     def get_qa_retrieval_chain(self, conversational: bool = False) -> RetrievalQAChain:
         """

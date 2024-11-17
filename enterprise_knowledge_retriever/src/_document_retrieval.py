@@ -1,0 +1,538 @@
+import logging
+import os
+import sys
+import threading
+from typing import Any, Dict, List, Optional, Tuple
+
+import nltk
+import torch
+import yaml
+from dotenv import load_dotenv
+from langchain.chains.base import Chain
+from langchain.docstore.document import Document
+from langchain.memory import ConversationSummaryMemory
+from langchain.prompts import ChatPromptTemplate
+from langchain_core.callbacks import CallbackManagerForChainRun
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.vectorstores.base import VectorStoreRetriever
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoModel
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+kit_dir = os.path.abspath(os.path.join(current_dir, '..'))
+repo_dir = os.path.abspath(os.path.join(kit_dir, '..'))
+sys.path.append(kit_dir)
+sys.path.append(repo_dir)
+
+from utils.model_wrappers.api_gateway import APIGateway
+from utils.vectordb.vector_db import VectorDb
+from utils.visual.env_utils import get_wandb_key
+
+CONFIG_PATH = os.path.join(kit_dir, 'config.yaml')
+PERSIST_DIRECTORY = os.path.join(kit_dir, 'data/my-vector-db')
+
+load_dotenv(os.path.join(repo_dir, '.env'))
+
+from utils.parsing.sambaparse import parse_doc_universal
+
+from enterprise_knowledge_retriever.src.pinata_helper import PinataHelper
+
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Configure the logger
+logging.basicConfig(
+    level=logging.INFO,  # Set the logging level (e.g., INFO, DEBUG)
+    format='%(asctime)s [%(levelname)s] - %(message)s',  # Define the log message format
+)
+# Create a logger object
+logger = logging.getLogger(__name__)
+
+
+# Handle the WANDB_API_KEY resolution before importing weave
+wandb_api_key = get_wandb_key()
+
+# If WANDB_API_KEY is set, proceed with weave initialization
+if wandb_api_key:
+    import weave
+
+    # Initialize Weave with your project name
+    weave.init('sambanova_ekr')
+else:
+    logger.info('WANDB_API_KEY is not set. Weave initialization skipped.')
+
+nltk.download('punkt_tab')
+nltk.download('averaged_perceptron_tagger_eng')
+
+
+def load_chat_prompt(path: str) -> ChatPromptTemplate:
+    """Load chat prompt from yaml file"""
+
+    with open(path, 'r') as file:
+        config = yaml.safe_load(file)
+
+    config.pop('_type')
+
+    template = config.pop('template')
+
+    if not template:
+        msg = "Can't load chat prompt without template"
+        raise ValueError(msg)
+
+    messages = []
+    if isinstance(template, str):
+        messages.append(('human', template))
+
+    elif isinstance(template, list):
+        for item in template:
+            messages.append((item['role'], item['content']))
+
+    return ChatPromptTemplate(messages=messages, **config)
+
+
+class RetrievalQAChain(Chain):
+    """class for question-answering.
+
+    Do retrieval over relevant documents in the vectorstore set in the retriever
+
+    If conversational enabled, before doing the retrieval QA call
+    the llm is called to rephrase original user query to  include relevant details in the history
+    then the rephrased query is used as input to the retriever and the QA call is done using
+    relevant documents, then the user query and final answer is added to the history and history
+    is summarized using the llm
+
+    When reranking enabled, reranker model is used to filter final_k_retrieved_documents
+    """
+
+    retriever: BaseRetriever
+    rerank: bool = True
+    llm: BaseChatModel
+    qa_prompt: ChatPromptTemplate
+    final_k_retrieved_documents: int = 3
+    conversational: bool = False
+    # wether or not to use memory and answer over reformulated query with history summary
+    # instead of answer over raw user query with our using history
+    summary_prompt: Optional[ChatPromptTemplate]
+    condensed_query_prompt: Optional[ChatPromptTemplate]
+
+    @property
+    def input_keys(self) -> List[str]:
+        """Input keys.
+        :meta private:
+        """
+        return ['question']
+
+    @property
+    def output_keys(self) -> List[str]:
+        """Output keys.
+        :meta private:
+        """
+        return ['answer', 'source_documents']
+
+    def __init__(self, **kwargs: Any) -> None:
+        """init and validate environment variables"""
+        super().__init__(**kwargs)
+        if self.conversational:
+            self.init_memory()
+
+    def _format_docs(self, docs: List[Document]) -> str:
+        return '\n\n'.join(doc.page_content for doc in docs)
+
+    def rerank_docs(self, query: str, docs: List[Document], final_k: int) -> List[Document]:
+        # Lazy hardcoding for now
+        tokenizer = AutoTokenizer.from_pretrained('BAAI/bge-reranker-large')
+        reranker = AutoModelForSequenceClassification.from_pretrained('BAAI/bge-reranker-large')
+        pairs = []
+        for d in docs:
+            pairs.append([query, d.page_content])
+
+        with torch.no_grad():
+            inputs = tokenizer(
+                pairs,
+                padding=True,
+                truncation=True,
+                return_tensors='pt',
+                max_length=512,
+            )
+            scores = (
+                reranker(**inputs, return_dict=True)
+                .logits.view(
+                    -1,
+                )
+                .float()
+            )
+
+        scores_list = scores.tolist()
+        scores_sorted_idx = sorted(range(len(scores_list)), key=lambda k: scores_list[k], reverse=True)
+
+        docs_sorted = [docs[k] for k in scores_sorted_idx]
+        # docs_sorted = [docs[k] for k in scores_sorted_idx if scores_list[k]>0]
+        docs_sorted = docs_sorted[:final_k]
+
+        return docs_sorted
+
+    def init_memory(self) -> None:
+        """
+        Initialize conversation summary memory for the conversation
+        """
+        assert self.summary_prompt is not None
+        self.memory = ConversationSummaryMemory(
+            llm=self.llm,
+            buffer='The conversation just started',
+            memory_key='chat_history',
+            return_messages=True,
+            output_key='answer',
+            prompt=self.summary_prompt,
+        )
+
+    def update_memory(self, query: str, response: str) -> None:
+        assert self.memory is not None
+        self.memory.save_context(inputs={'input': query}, outputs={'answer': response})
+
+    def reformulate_query_with_history(self, query: str) -> str:
+        """
+        Reformulates the query based on the conversation history.
+
+        Args:
+        query (str): The current query to reformulate.
+
+        Returns:
+        str: The reformulated query.
+        """
+        if self.memory is None:
+            self.init_memory()
+        assert self.condensed_query_prompt is not None
+        custom_condensed_question_prompt = self.condensed_query_prompt
+        assert self.memory is not None
+        history = self.memory.load_memory_variables({})
+        logger.info(f'HISTORY: {history}')
+        reformulation_chain = custom_condensed_question_prompt | self.llm | StrOutputParser()
+        reformulated_query = reformulation_chain.invoke(input={'chat_history': history, 'question': query})
+        return reformulated_query
+
+    def _call(
+        self,
+        inputs: Dict[str, Any],
+        run_manager: Optional[CallbackManagerForChainRun] = None,
+    ) -> Dict[str, Any]:
+        """ "call the Retrieval QA Chain"""
+
+        qa_chain = self.qa_prompt | self.llm | StrOutputParser()
+
+        logger.info(f'USER QUERY: {inputs["question"]}')
+
+        # when conversational enabled, before retrieval
+        # the user query is reformulated using stored history summary
+        if self.conversational:
+            query = self.reformulate_query_with_history(inputs['question'])
+            logger.info(f'REFORMULATED QUERY: {query}')
+        else:
+            query = inputs['question']
+
+        documents = self.retriever.invoke(query)
+        if self.rerank:
+            documents = self.rerank_docs(query, documents, self.final_k_retrieved_documents)
+        docs = self._format_docs(documents)
+        response: Dict[str, Any] = {}
+        response['answer'] = qa_chain.invoke({'question': query, 'context': docs})
+        response['source_documents'] = documents
+
+        # Update memory when conversational mode is enabled
+        if self.conversational:
+            threading.Thread(target=self.update_memory, args=(inputs['question'], response['answer'])).start()
+
+        return response
+
+class DocumentRetrieval:
+    def __init__(self, sambanova_api_key: str, pinata_api_key: str, pinata_secret_key: str) -> None:
+        self.pinata = PinataHelper(api_key=pinata_api_key, api_secret=pinata_secret_key)
+        config_info = self.get_config_info()
+        self.llm_info: Dict[str, Any] = config_info[0]
+        self.embedding_model_info: Dict[str, Any] = config_info[1]
+        self.retrieval_info: Dict[str, Any] = config_info[2]
+        self.prompts: Dict[str, Any] = config_info[3]
+        self.prod_mode: bool = config_info[4]
+        self.pdf_only_mode: bool = config_info[5]
+        # self.retriever = None
+        self.sambanova_api_key = sambanova_api_key
+        self.llm = self.set_llm()
+        self.embedding_model = self.load_embedding_model()
+
+    def get_config_info(self) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str], bool, bool]:
+        """
+        Loads json config file
+        """
+        # Read config file
+        with open(CONFIG_PATH, 'r') as yaml_file:
+            config = yaml.safe_load(yaml_file)
+        llm_info = config['llm']
+        embedding_model_info = config['embedding_model']
+        retrieval_info = config['retrieval']
+        prompts = config['prompts']
+        prod_mode = config['prod_mode']
+        pdf_only_mode = config['pdf_only_mode']
+
+        return llm_info, embedding_model_info, retrieval_info, prompts, prod_mode, pdf_only_mode
+
+    def set_llm(self) -> BaseChatModel:
+        llm = APIGateway.load_chat(
+            type=self.llm_info['api'],
+            do_sample=self.llm_info['do_sample'],
+            max_tokens=self.llm_info['max_tokens'],
+            temperature=self.llm_info['temperature'],
+            model=self.llm_info['model'],
+            process_prompt=False,
+            sambanova_api_key=self.sambanova_api_key,
+        )
+        return llm
+
+    def parse_doc(self, doc_folder: str, additional_metadata: Optional[Dict[str, Any]] = None) -> List[Document]:
+        """
+        Parse specified documents and return a list of LangChain documents.
+
+        Args:
+            doc_folder (str): Path to the documents.
+            additional_metadata (Optional[Dict], optional): Additional metadata to include in the processed documents.
+                Defaults to an empty dictionary.
+
+        Returns:
+            List[Document]: A list of LangChain documents.
+        """
+        if additional_metadata is None:
+            additional_metadata = {}
+
+        _, _, langchain_docs = parse_doc_universal(
+            doc=doc_folder, additional_metadata=additional_metadata, lite_mode=self.pdf_only_mode
+        )
+
+        return langchain_docs
+
+    def load_embedding_model(self) -> Embeddings:
+        embeddings = APIGateway.load_embedding_model(
+            type=self.embedding_model_info['type'],
+            batch_size=self.embedding_model_info['batch_size'],
+            coe=self.embedding_model_info['coe'],
+            select_expert=self.embedding_model_info['select_expert'],
+        )
+        return embeddings
+
+    # def create_vector_store(
+    #     self,
+    #     text_chunks: List[Document],
+    #     embeddings: Any,
+    #     output_db: Optional[str] = None,
+    #     collection_name: Optional[str] = None,
+    # ) -> Any:
+    #     logger.info(f'Created collection, name is {collection_name}')
+    #     vectorstore = self.vectordb.create_vector_store(
+    #         text_chunks, embeddings, output_db=output_db, collection_name=collection_name, db_type='chroma'
+    #     )
+    #     return vectorstore
+
+    # def load_vdb(self, db_path: str, embeddings: Any, collection_name: Optional[str] = None) -> Any:
+    #     logger.info(f'Loading collection, name is {collection_name}')
+    #     vectorstore = self.vectordb.load_vdb(db_path, embeddings, db_type='chroma', collection_name=collection_name)
+    #     return vectorstore
+
+    def retrieve_documents(self, ipfs_hashes: List[str]) -> List[Document]:
+        documents = []
+        for ipfs_hash in ipfs_hashes:
+            metadata = self.pinata.get_file_metadata(ipfs_hash)
+            content_path = f"temp/{ipfs_hash}.txt"
+            self.pinata.download_file(ipfs_hash, content_path)
+            with open(content_path, "r") as file:
+                content = file.read()
+                documents.append(Document(page_content=content, metadata=metadata))
+        return documents
+
+    def compute_similarity(self, query: str, documents: List[Document]) -> List[Tuple[float, Document]]:
+        """Compute cosine similarity between the query and documents."""
+        # Load tokenizer and model for generating embeddings
+        tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
+        model = AutoModel.from_pretrained('distilbert-base-uncased')
+
+        inputs = tokenizer([query] + [doc.page_content for doc in documents], padding=True, return_tensors="pt", truncation=True)
+        with torch.no_grad():
+            embeddings = model(**inputs).last_hidden_state.mean(dim=1).numpy()
+        
+        # Compute cosine similarity between the query and each document
+        query_embedding = embeddings[0].reshape(1, -1)
+        doc_embeddings = embeddings[1:]
+        similarities = cosine_similarity(query_embedding, doc_embeddings).flatten()
+
+        # Return list of tuples containing similarity score and corresponding document
+        scored_documents = [(similarity, doc) for similarity, doc in zip(similarities, documents)]
+        return sorted(scored_documents, reverse=True, key=lambda x: x[0])
+
+    # def init_retriever(self, vectorstore: Any) -> None:
+    #     if self.retrieval_info['rerank']:
+    #         self.retriever = vectorstore.as_retriever(
+    #             search_type='similarity_score_threshold',
+    #             search_kwargs={
+    #                 'score_threshold': self.retrieval_info['score_threshold'],
+    #                 'k': self.retrieval_info['k_retrieved_documents'],
+    #             },
+    #         )
+    #     else:
+    #         self.retriever = vectorstore.as_retriever(
+    #             search_type='similarity_score_threshold',
+    #             search_kwargs={
+    #                 'score_threshold': self.retrieval_info['score_threshold'],
+    #                 'k': self.retrieval_info['final_k_retrieved_documents'],
+    #             },
+    #         )
+
+    def get_qa_retrieval_chain(self, conversational: bool = False) -> RetrievalQAChain:
+        """
+        Generate a qa_retrieval chain using a language model.
+
+        This function uses a language model, specifically a SambaNova LLM, to generate a qa_retrieval chain
+        based on the input vector store of text chunks.
+
+        Parameters:
+        conversational: wether or not to use memory
+        when enabled user query is reformulated using history summary
+
+        Returns:
+        RetrievalQA: A chain ready for QA without memory
+        """
+        # assert isinstance(
+        #     self.retriever, VectorStoreRetriever
+        # ), f'The Retriever must be VectorStoreRetriever. Got type {type(self.retriever)}'
+        custom_retriever = CustomRetriever(doc_retrieval_instance=self)
+        retrievalQAChain = RetrievalQAChain(
+            # retriever=self.retriever,
+            retriever=custom_retriever,
+            llm=self.llm,
+            qa_prompt=load_chat_prompt(os.path.join(repo_dir, self.prompts['qa_prompt'])),
+            rerank=self.retrieval_info['rerank'],
+            final_k_retrieved_documents=self.retrieval_info['final_k_retrieved_documents'],
+            conversational=conversational,
+            summary_prompt=load_chat_prompt(os.path.join(repo_dir, self.prompts['summary_prompt'])),
+            condensed_query_prompt=load_chat_prompt(os.path.join(repo_dir, self.prompts['condensed_query_prompt'])),
+        )
+        return retrievalQAChain
+
+class CustomRetriever(BaseRetriever):
+    def __init__(self, doc_retrieval_instance: DocumentRetrieval):
+        self.doc_retrieval_instance = doc_retrieval_instance
+
+    def _get_relevant_documents(self, query: str) -> List[Document]:
+        pass
+    
+    def _retrieve(self, query: str) -> List[Document]:
+        ipfs_hashes = self.doc_retrieval_instance.get_ipfs_hashes_for_query(query)  # Implement this method
+        documents = self.doc_retrieval_instance.retrieve_documents(ipfs_hashes)
+        scored_docs = self.doc_retrieval_instance.compute_similarity(query, documents)
+        top_docs = [doc for score, doc in scored_docs[:self.doc_retrieval_instance.retrieval_info['final_k_retrieved_documents']]]
+        return top_docs
+
+# class PinataRetriever():
+#     def __init__(self, pinata_api_key: str, pinata_secret_api_key: str):
+#         print(f"Key: {pinata_api_key}, Secret Key: {pinata_secret_api_key}")
+#         self.api_key = pinata_api_key
+#         self.secret_api_key = pinata_secret_api_key
+#         self.gateway_url = "https://gateway.pinata.cloud/ipfs/"
+#         print(f"API Key: {self.api_key}, Secret Key: {self.secret_api_key}")
+
+#     def fetch_file_from_ipfs(self, cid: str) -> str:
+#         """
+#         Fetch file content from Pinata using its IPFS CID.
+#         """
+#         url = f"{self.gateway_url}{cid}"
+#         headers = {
+#             "pinata_api_key": self.api_key,
+#             "pinata_secret_api_key": self.secret_api_key,
+#         }
+#         response = requests.get(url, headers=headers)
+#         if response.status_code == 200:
+#             return response.text  # or `response.content` for binary files
+#         else:
+#             raise ValueError(f"Failed to fetch file: {response.status_code} {response.text}")
+
+#     def fetch_metadata(self) -> List[Dict[str, Any]]:
+#         """
+#         List pinned files or retrieve metadata using Pinata API.
+#         """
+#         logging.info("fetch metadata")
+#         url = "https://api.pinata.cloud/data/pinList"
+#         headers = {
+#             "pinata_api_key": self.api_key,
+#             "pinata_secret_api_key": self.secret_api_key,
+#         }
+#         response = requests.get(url, headers=headers)
+#         if response.status_code == 200:
+#             return response.json()["rows"]  # Metadata for pinned files
+#         else:
+#             raise ValueError(f"Failed to fetch metadata: {response.status_code} {response.text}")
+
+#     # def _get_relevant_documents(self, query: str) -> List[Document]:
+#     #     """
+#     #     Retrieve and preprocess documents based on a query.
+#     #     """
+#     #     # Step 1: Fetch all files from Pinata
+#     #     metadata = self.fetch_metadata()
+        
+#     #     # Step 2: Fetch content for each file and create `Document` objects
+#     #     documents = []
+#     #     for file_info in metadata:
+#     #         cid = file_info["ipfs_pin_hash"]
+#     #         logging.info(cid)
+#     #         content = self.fetch_file_from_ipfs(cid)
+#     #         doc = Document(page_content=content, metadata={"filename": file_info["metadata"]["name"]})
+#     #         documents.append(doc)
+        
+#     #     # Step 3: Perform a simple similarity search (e.g., cosine similarity on embeddings)
+#     #     embeddings = self.compute_embeddings([doc.page_content for doc in documents])
+#     #     query_embedding = self.compute_embeddings([query])[0]
+        
+#     #     # Step 4: Rank documents based on similarity
+#     #     similarities = [(doc, self.compute_similarity(query_embedding, emb)) for doc, emb in zip(documents, embeddings)]
+#     #     ranked_docs = sorted(similarities, key=lambda x: x[1], reverse=True)
+        
+#     #     # Return top-N documents
+#     #     return [doc[0] for doc in ranked_docs[:3]]
+
+#     def invoke(self, query: str) -> List[Document]:
+#         """
+#         Retrieve and preprocess documents based on a query.
+#         """
+#         # Step 1: Fetch all files from Pinata
+#         metadata = self.fetch_metadata()
+        
+#         # Step 2: Fetch content for each file and create `Document` objects
+#         documents = []
+#         for file_info in metadata:
+#             cid = file_info["ipfs_pin_hash"]
+#             content = self.fetch_file_from_ipfs(cid)
+#             doc = Document(page_content=content, metadata={"filename": file_info["metadata"]["name"]})
+#             documents.append(doc)
+        
+#         # Step 3: Perform a simple similarity search (e.g., cosine similarity on embeddings)
+#         # You could use sentence-transformers or any other embedding model here.
+#         embeddings = self.compute_embeddings([doc.page_content for doc in documents])
+#         query_embedding = self.compute_embeddings([query])[0]
+        
+#         # Step 4: Rank documents based on similarity
+#         similarities = [(doc, self.compute_similarity(query_embedding, emb)) for doc, emb in zip(documents, embeddings)]
+#         ranked_docs = sorted(similarities, key=lambda x: x[1], reverse=True)
+        
+#         # Return top-N documents
+#         return [doc[0] for doc in ranked_docs[:3]]
+
+#     def compute_embeddings(self, texts: List[str]) -> List[List[float]]:
+#         """
+#         Generate embeddings for a list of texts. Use any pre-trained embedding model.
+#         """
+#         from sentence_transformers import SentenceTransformer
+#         model = SentenceTransformer('all-MiniLM-L6-v2')  # Example embedding model
+#         return model.encode(texts).tolist()
+
+#     def compute_similarity(self, query_emb: List[float], doc_emb: List[float]) -> float:
+#         """
+#         Compute cosine similarity between query and document embeddings.
+#         """
+#         import numpy as np
+#         return np.dot(query_emb, doc_emb) / (np.linalg.norm(query_emb) * np.linalg.norm(doc_emb))
